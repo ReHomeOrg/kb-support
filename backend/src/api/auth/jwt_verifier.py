@@ -3,8 +3,9 @@
 Любая ошибка верификации (подпись/iss/aud/exp/nbf/kid/формат/sub) → 401 (fail-closed).
 Маппинг клеймов (конвенция Keycloak protocol-mappers, см. README):
 - `sub` → user_id (UUID);
-- `kbs_kind` (requester/operator/service, default requester) → kind;
+- `kbs_kind` (requester/operator/service/agent, default requester) → kind;
 - `kbs_teams` (list) → teams (валидные TicketTeam);
+- `kbs_act_sub` (UUID) → on_behalf_of (делегированная авторизация агента, FR-9.7);
 - `scope` (OAuth, space-separated) → scopes.
 """
 
@@ -30,6 +31,16 @@ def _parse_kind(value: object) -> PrincipalKind:
     return PrincipalKind.REQUESTER
 
 
+def _parse_act_sub(value: object) -> uuid.UUID | None:
+    """`kbs_act_sub` → UUID делегированного пользователя; невалидное → None (fail-closed)."""
+    if isinstance(value, str):
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
 def claims_to_principal(claims: dict[str, Any]) -> Principal:
     """Собрать `Principal` из проверенных клеймов токена."""
     try:
@@ -46,6 +57,7 @@ def claims_to_principal(claims: dict[str, Any]) -> Principal:
         kind=_parse_kind(claims.get("kbs_kind")),
         scopes=scopes,
         teams=teams,
+        on_behalf_of=_parse_act_sub(claims.get("kbs_act_sub")),
     )
 
 

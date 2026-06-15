@@ -55,6 +55,27 @@ async def test_invalid_team_values_ignored(verifier: JwtVerifier, make_token: To
 
 
 @pytest.mark.asyncio
+async def test_agent_delegation_claim_maps_to_on_behalf_of(
+    verifier: JwtVerifier, make_token: TokenMaker
+) -> None:
+    agent_sub = uuid.uuid4()
+    user_sub = uuid.uuid4()
+    token = make_token({"sub": str(agent_sub), "kbs_kind": "agent", "kbs_act_sub": str(user_sub)})
+    principal = await verifier.verify(token)
+    assert principal.kind is PrincipalKind.AGENT
+    assert principal.is_agent is True
+    assert principal.on_behalf_of == user_sub
+    assert principal.effective_user_id == user_sub
+
+
+@pytest.mark.asyncio
+async def test_invalid_act_sub_ignored(verifier: JwtVerifier, make_token: TokenMaker) -> None:
+    principal = await verifier.verify(make_token({"kbs_act_sub": "not-a-uuid"}))
+    assert principal.on_behalf_of is None
+    assert principal.effective_user_id == principal.user_id
+
+
+@pytest.mark.asyncio
 async def test_expired_token_rejected(verifier: JwtVerifier, make_token: TokenMaker) -> None:
     with pytest.raises(ProblemException) as exc:
         await verifier.verify(make_token(exp_delta=-10))

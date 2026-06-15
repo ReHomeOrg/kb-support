@@ -23,12 +23,14 @@ class PrincipalKind(str, enum.Enum):
 
     REQUESTER — заявитель (видит только свои заявки). OPERATOR — сотрудник
     поддержки (видит заявки своих команд). SERVICE — m2m-вызов (напр. kb-search
-    при эскалации из чата, E3).
+    при эскалации из чата, E3). AGENT — ИИ-агент-оркестратор «Консьерж»,
+    действует on-behalf-of пользователя (делегированная авторизация, FR-9.7).
     """
 
     REQUESTER = "requester"
     OPERATOR = "operator"
     SERVICE = "service"
+    AGENT = "agent"
 
 
 @dataclass(frozen=True)
@@ -37,17 +39,35 @@ class Principal:
 
     `teams` заполняется для операторов и определяет видимость заявок по командам
     (storage-level фильтр, NFR-1.2). `scopes` — гранулярные права из токена.
+    `on_behalf_of` — sub пользователя, от имени которого действует агент
+    (делегированная авторизация, FR-9.7); для не-агентных субъектов — None.
     """
 
     user_id: uuid.UUID
     kind: PrincipalKind
     scopes: frozenset[str] = field(default_factory=frozenset)
     teams: frozenset[TicketTeam] = field(default_factory=frozenset)
+    on_behalf_of: uuid.UUID | None = None
 
     @property
     def is_operator(self) -> bool:
         """Является ли субъект оператором (доступ к заявкам по командам)."""
         return self.kind is PrincipalKind.OPERATOR
+
+    @property
+    def is_agent(self) -> bool:
+        """Является ли субъект ИИ-агентом-оркестратором (E9/FR-9.7, делегирование)."""
+        return self.kind is PrincipalKind.AGENT
+
+    @property
+    def effective_user_id(self) -> uuid.UUID:
+        """Пользователь, от чьего ИМЕНИ применяются права видимости.
+
+        Для агента (`kbs_kind=agent` + `kbs_act_sub`) это делегированный
+        пользователь (`on_behalf_of`); для остальных — сам `user_id`. RBAC-фильтры
+        видимости должны опираться на это поле, чтобы агент видел данные ПОЛЬЗОВАТЕЛЯ,
+        а не сервис-принципала (G7)."""
+        return self.on_behalf_of if self.on_behalf_of is not None else self.user_id
 
     @property
     def is_staff_admin(self) -> bool:
