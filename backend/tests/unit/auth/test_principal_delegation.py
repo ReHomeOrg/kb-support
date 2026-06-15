@@ -1,4 +1,4 @@
-"""Unit-тесты делегирования в `Principal` (FR-9.7): effective_user_id / is_agent."""
+"""Unit-тесты делегирования в `Principal` (CC-1, on-behalf-of): effective_user_id / is_agent."""
 
 from __future__ import annotations
 

@@ -5,7 +5,8 @@
 - `sub` → user_id (UUID);
 - `kbs_kind` (requester/operator/service/agent, default requester) → kind;
 - `kbs_teams` (list) → teams (валидные TicketTeam);
-- `kbs_act_sub` (UUID) → on_behalf_of (делегированная авторизация агента, FR-9.7);
+- `kbs_act_sub` (UUID) → on_behalf_of (делегирование Консьержа, on-behalf-of;
+  CC-1 / token-exchange RFC 8693). Читается ТОЛЬКО при `kbs_kind=agent`;
 - `scope` (OAuth, space-separated) → scopes.
 """
 
@@ -52,12 +53,18 @@ def claims_to_principal(claims: dict[str, Any]) -> Principal:
         TicketTeam(team) for team in raw_teams if isinstance(team, str) and team in _TEAM_VALUES
     )
     scopes = frozenset(str(claims.get("scope", "")).split())
+    kind = _parse_kind(claims.get("kbs_kind"))
+    # Делегирование (on-behalf-of) читаем ТОЛЬКО у агента (defense-in-depth): даже
+    # если act_sub-mapper по ошибке навесят на не-agent клиента, имперсонации не будет.
+    on_behalf_of = (
+        _parse_act_sub(claims.get("kbs_act_sub")) if kind is PrincipalKind.AGENT else None
+    )
     return Principal(
         user_id=user_id,
-        kind=_parse_kind(claims.get("kbs_kind")),
+        kind=kind,
         scopes=scopes,
         teams=teams,
-        on_behalf_of=_parse_act_sub(claims.get("kbs_act_sub")),
+        on_behalf_of=on_behalf_of,
     )
 
 

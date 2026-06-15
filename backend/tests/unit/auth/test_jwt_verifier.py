@@ -70,7 +70,22 @@ async def test_agent_delegation_claim_maps_to_on_behalf_of(
 
 @pytest.mark.asyncio
 async def test_invalid_act_sub_ignored(verifier: JwtVerifier, make_token: TokenMaker) -> None:
-    principal = await verifier.verify(make_token({"kbs_act_sub": "not-a-uuid"}))
+    # Агент с битым act_sub: fail-closed → on_behalf_of None, видимость от своего sub.
+    principal = await verifier.verify(
+        make_token({"kbs_kind": "agent", "kbs_act_sub": "not-a-uuid"})
+    )
+    assert principal.on_behalf_of is None
+    assert principal.effective_user_id == principal.user_id
+
+
+@pytest.mark.asyncio
+async def test_act_sub_ignored_for_non_agent(verifier: JwtVerifier, make_token: TokenMaker) -> None:
+    # Defense-in-depth: act_sub у не-agent субъекта НЕ даёт делегирования, даже если валиден.
+    user_sub = uuid.uuid4()
+    principal = await verifier.verify(
+        make_token({"kbs_kind": "requester", "kbs_act_sub": str(user_sub)})
+    )
+    assert principal.kind is PrincipalKind.REQUESTER
     assert principal.on_behalf_of is None
     assert principal.effective_user_id == principal.user_id
 
