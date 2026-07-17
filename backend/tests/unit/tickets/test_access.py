@@ -47,3 +47,14 @@ def test_agent_filter_uses_delegated_user_not_agent() -> None:
     assert user_sub.hex in sql
     assert agent_sub.hex not in sql
     assert "team" not in sql
+
+
+def test_new_scheme_agent_filter_is_owner_only() -> None:
+    """Новая схема act.sub: sub УЖЕ = пользователь, on_behalf_of=None → видимость по
+    user_id (собственные заявки), без team-ветки (kind не OPERATOR)."""
+    user_sub = uuid.uuid4()
+    sql = _sql(
+        Principal(user_id=user_sub, kind=PrincipalKind.REQUESTER, acting_agent="kb-concierge-m2m")
+    )
+    assert user_sub.hex in sql
+    assert "team" not in sql

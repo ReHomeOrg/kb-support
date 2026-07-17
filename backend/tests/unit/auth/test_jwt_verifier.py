@@ -69,6 +69,64 @@ async def test_agent_delegation_claim_maps_to_on_behalf_of(
 
 
 @pytest.mark.asyncio
+async def test_act_sub_maps_to_acting_agent(
+    verifier: JwtVerifier, make_token: TokenMaker
+) -> None:
+    # Новая схема CC-1: sub = ПОЛЬЗОВАТЕЛЬ (обмен impersonation), act.sub = агент.
+    user_sub = uuid.uuid4()
+    token = make_token(
+        {
+            "sub": str(user_sub),
+            "act": {"sub": "kb-concierge-m2m"},
+            "azp": "kb-concierge-m2m",
+        }
+    )
+    principal = await verifier.verify(token)
+    assert principal.acting_agent == "kb-concierge-m2m"
+    assert principal.is_agent is True
+    # sub уже = пользователь → on_behalf_of не ставится, видимость от sub.
+    assert principal.on_behalf_of is None
+    assert principal.user_id == user_sub
+    assert principal.effective_user_id == user_sub
+
+
+@pytest.mark.asyncio
+async def test_act_sub_and_legacy_act_sub_conflict_401(
+    verifier: JwtVerifier, make_token: TokenMaker
+) -> None:
+    # Оба клейма делегирования одновременно → неоднозначность → 401 (David, вопрос 4).
+    token = make_token(
+        {
+            "act": {"sub": "kb-concierge-m2m"},
+            "azp": "kb-concierge-m2m",
+            "kbs_act_sub": str(uuid.uuid4()),
+        }
+    )
+    with pytest.raises(ProblemException) as exc:
+        await verifier.verify(token)
+    assert exc.value.status == 401
+
+
+@pytest.mark.asyncio
+async def test_act_sub_azp_mismatch_401(verifier: JwtVerifier, make_token: TokenMaker) -> None:
+    # Целостность: act.sub должен совпадать с azp; рассинхрон → 401 (подделка).
+    token = make_token({"act": {"sub": "kb-concierge-m2m"}, "azp": "someone-else"})
+    with pytest.raises(ProblemException) as exc:
+        await verifier.verify(token)
+    assert exc.value.status == 401
+
+
+@pytest.mark.asyncio
+async def test_act_sub_without_azp_accepted(
+    verifier: JwtVerifier, make_token: TokenMaker
+) -> None:
+    # Нет azp — целостность не проверяем (мягко), act.sub принимается.
+    principal = await verifier.verify(make_token({"act": {"sub": "kb-concierge-m2m"}}))
+    assert principal.acting_agent == "kb-concierge-m2m"
+    assert principal.is_agent is True
+
+
+@pytest.mark.asyncio
 async def test_invalid_act_sub_ignored(verifier: JwtVerifier, make_token: TokenMaker) -> None:
     # Агент с битым act_sub: fail-closed → on_behalf_of None, видимость от своего sub.
     principal = await verifier.verify(

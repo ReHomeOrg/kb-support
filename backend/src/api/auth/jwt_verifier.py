@@ -5,9 +5,17 @@
 - `sub` → user_id (UUID);
 - `kbs_kind` (requester/operator/service/agent, default requester) → kind;
 - `kbs_teams` (list) → teams (валидные TicketTeam);
-- `kbs_act_sub` (UUID) → on_behalf_of (делегирование Консьержа, on-behalf-of;
-  CC-1 / token-exchange RFC 8693). Читается ТОЛЬКО при `kbs_kind=agent`;
+- `act.sub` (вложенный RFC 8693 actor-claim, строка = clientId агента) →
+  acting_agent. **Новая схема делегирования CC-1**: `sub` уже = пользователь
+  (обмен impersonation), `act.sub` лишь фиксирует, что действует агент;
+- `kbs_act_sub` (UUID) → on_behalf_of (**легаси** делегирование, `sub`=агент-SA,
+  `kbs_act_sub`=пользователь). Читается ТОЛЬКО при `kbs_kind=agent`;
 - `scope` (OAuth, space-separated) → scopes.
+
+Инварианты делегирования (David, 2026-07-16):
+- `act.sub` и легаси `kbs_act_sub` **взаимоисключающие** — оба в токене → 401;
+- при наличии `act.sub` проверяется целостность `act.sub == azp` (оба проставляет
+  Keycloak при обмене), рассинхрон → 401.
 """
 
 from __future__ import annotations
@@ -42,6 +50,19 @@ def _parse_act_sub(value: object) -> uuid.UUID | None:
     return None
 
 
+def _parse_acting_agent(value: object) -> str | None:
+    """Вложенный RFC 8693 `act` → `act.sub` (строка = clientId агента).
+
+    `{"act": {"sub": "kb-concierge-m2m"}}` → `"kb-concierge-m2m"`. Это идентификатор
+    АГЕНТА (clientId), не пользователя. Пустое/некорректное → None.
+    """
+    if isinstance(value, dict):
+        sub = value.get("sub")
+        if isinstance(sub, str) and sub:
+            return sub
+    return None
+
+
 def claims_to_principal(claims: dict[str, Any]) -> Principal:
     """Собрать `Principal` из проверенных клеймов токена."""
     try:
@@ -54,8 +75,24 @@ def claims_to_principal(claims: dict[str, Any]) -> Principal:
     )
     scopes = frozenset(str(claims.get("scope", "")).split())
     kind = _parse_kind(claims.get("kbs_kind"))
-    # Делегирование (on-behalf-of) читаем ТОЛЬКО у агента (defense-in-depth): даже
-    # если act_sub-mapper по ошибке навесят на не-agent клиента, имперсонации не будет.
+
+    # Новая схема делегирования CC-1: стандартный act.sub (агент действует от имени
+    # пользователя; sub уже = пользователь). Взаимоисключающа с легаси kbs_act_sub.
+    acting_agent = _parse_acting_agent(claims.get("act"))
+    legacy_act_present = claims.get("kbs_act_sub") is not None
+    if acting_agent is not None and legacy_act_present:
+        raise ProblemException.unauthorized(
+            detail="Ambiguous delegation: both act.sub and kbs_act_sub present"
+        )
+    # Целостность: act.sub должен совпадать с azp (оба проставляет Keycloak при обмене).
+    # Мягко при ОТСУТСТВИИ azp (None); присутствующий, но не равный (в т.ч. не-строка) → 401.
+    if acting_agent is not None:
+        azp = claims.get("azp")
+        if azp is not None and azp != acting_agent:
+            raise ProblemException.unauthorized(detail="act.sub does not match azp")
+
+    # Легаси on-behalf-of читаем ТОЛЬКО у агента (defense-in-depth): даже если
+    # act_sub-mapper по ошибке навесят на не-agent клиента, имперсонации не будет.
     on_behalf_of = (
         _parse_act_sub(claims.get("kbs_act_sub")) if kind is PrincipalKind.AGENT else None
     )
@@ -65,6 +102,7 @@ def claims_to_principal(claims: dict[str, Any]) -> Principal:
         scopes=scopes,
         teams=teams,
         on_behalf_of=on_behalf_of,
+        acting_agent=acting_agent,
     )
 
 
