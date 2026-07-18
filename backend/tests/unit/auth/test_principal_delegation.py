@@ -30,3 +30,15 @@ def test_agent_without_delegation_falls_back_to_self() -> None:
     principal = Principal(user_id=agent_sub, kind=PrincipalKind.AGENT)
     assert principal.is_agent is True
     assert principal.effective_user_id == agent_sub
+
+
+def test_acting_agent_marks_agent_and_effective_user_is_sub() -> None:
+    # Новая схема act.sub: kind=REQUESTER (kbs_kind-маппер не срабатывает на обмене),
+    # но acting_agent → is_agent True; sub уже = пользователь → effective = user_id.
+    user_sub = uuid.uuid4()
+    principal = Principal(
+        user_id=user_sub, kind=PrincipalKind.REQUESTER, acting_agent="kb-concierge-m2m"
+    )
+    assert principal.is_agent is True
+    assert principal.on_behalf_of is None
+    assert principal.effective_user_id == user_sub
