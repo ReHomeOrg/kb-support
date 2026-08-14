@@ -28,6 +28,11 @@ export async function OperatorHeader() {
           <Link href="/reports" className="text-gray-600 hover:text-gray-900">
             Отчёты
           </Link>
+          {/* L1: кросс-переход в CRM-продажи (отдельный сервис, тот же Keycloak-realm
+              → SSO без повторного логина). Внешний href, не next/link. */}
+          <a href="https://rehome.one/staff/crm" className="text-gray-600 hover:text-gray-900">
+            Продажи (CRM) ↗
+          </a>
         </nav>
       </div>
       <div className="flex items-center gap-3 text-sm">
