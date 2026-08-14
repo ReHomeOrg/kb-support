@@ -69,9 +69,7 @@ async def test_agent_delegation_claim_maps_to_on_behalf_of(
 
 
 @pytest.mark.asyncio
-async def test_act_sub_maps_to_acting_agent(
-    verifier: JwtVerifier, make_token: TokenMaker
-) -> None:
+async def test_act_sub_maps_to_acting_agent(verifier: JwtVerifier, make_token: TokenMaker) -> None:
     # Новая схема CC-1: sub = ПОЛЬЗОВАТЕЛЬ (обмен impersonation), act.sub = агент.
     user_sub = uuid.uuid4()
     token = make_token(
@@ -117,9 +115,7 @@ async def test_act_sub_azp_mismatch_401(verifier: JwtVerifier, make_token: Token
 
 
 @pytest.mark.asyncio
-async def test_act_sub_without_azp_accepted(
-    verifier: JwtVerifier, make_token: TokenMaker
-) -> None:
+async def test_act_sub_without_azp_accepted(verifier: JwtVerifier, make_token: TokenMaker) -> None:
     # Нет azp — целостность не проверяем (мягко), act.sub принимается.
     principal = await verifier.verify(make_token({"act": {"sub": "kb-concierge-m2m"}}))
     assert principal.acting_agent == "kb-concierge-m2m"
