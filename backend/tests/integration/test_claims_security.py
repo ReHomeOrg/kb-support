@@ -428,3 +428,48 @@ def test_decision_and_transition_recorded_with_actor(client: TestClient) -> None
     assert decided[0]["actor_id"] == str(op.user_id)
     # История доступна только на чтение (нет мутирующего эндпоинта) — GET-only контракт.
     assert "case_decided" in _history_actions(client, ticket_id)
+
+
+# --- Группа 6: гигиена служебных claims-полей ------------------------------
+
+
+def _db_scalar(query: str, params: dict[str, object]) -> object:
+    """Прочитать одно значение из СВОЕЙ тест-БД (проверка того, что в API не видно)."""
+
+    async def _inner() -> object:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(text(query), params)
+                return result.scalar()
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(_inner())
+
+
+def test_rejecting_a_pending_payout_clears_the_first_approver(client: TestClient) -> None:
+    """PAYOUT_PENDING→REJECTED убирает маркер первого аппрувера «4 глаз» (#216).
+
+    Проверяем в БД, а не через API: ключ намеренно скрыт от заявителя редакцией, то
+    есть «его не видно в ответе» ничего не доказывает. Успешный PAID чистил маркер и
+    раньше; отказ — нет, и actor первого аппрува оставался висеть в JSONB навсегда.
+    """
+    op = _operator()
+    _use(op)
+    ticket_id = _create(client).json()["data"]["id"]
+    _set_case_state(ticket_id, "PAYOUT_PENDING")
+    assert _case_state(client, ticket_id, case_state="PAID").status_code == 200  # 1-й аппрув
+    before = _db_scalar(
+        "SELECT custom_fields #>> '{claims,payout_first_approver}' FROM tickets WHERE id = :id",
+        {"id": uuid.UUID(ticket_id)},
+    )
+    assert before == str(op.user_id), "предусловие: маркер записан первым аппрувом"
+
+    assert _case_state(client, ticket_id, case_state="REJECTED").status_code == 200
+
+    after = _db_scalar(
+        "SELECT custom_fields #>> '{claims,payout_first_approver}' FROM tickets WHERE id = :id",
+        {"id": uuid.UUID(ticket_id)},
+    )
+    assert after is None, "маркер не относится ни к чему после ухода из фазы выплаты"
