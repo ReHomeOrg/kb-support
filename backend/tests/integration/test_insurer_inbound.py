@@ -423,3 +423,88 @@ def _insurer_status_in_payload(ticket_id: str) -> str | None:
             await engine.dispose()
 
     return asyncio.run(_read())
+
+
+def _close(client: TestClient, ticket_id: str) -> None:
+    """Закрыть заявку оператором (как в жизни: разобрались и закрыли)."""
+    _use(_OPERATOR)
+    resp = client.patch(f"/api/v1/support/tickets/{ticket_id}", json={"status": "CLOSED"})
+    assert resp.status_code == 200, resp.text
+
+
+def test_event_on_closed_claim_is_accepted_not_lost(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Событие страховщика по ЗАКРЫТОЙ заявке принимается, а не теряется в 404 (#222).
+
+    Страховщик присылает вердикт тогда, когда присылает; оператор мог закрыть заявку
+    раньше. Прежний резолв (`find_active_by_number`, писался под приём почты) исключал
+    CLOSED — событие отвергалось, `insurance_event_id` не проставлялся, и связь с
+    выплатой терялась молча.
+    """
+    monkeypatch.setattr("api.webhooks.dispatcher.deliver_webhook", _noop_deliver)
+    _enable_secret(monkeypatch)
+    number = _create_insurance_claim(client)
+    ticket_id = _ticket_id_by_number(client, number)
+    _close(client, ticket_id)
+
+    _use(_SERVICE)
+    event_id = str(uuid.uuid4())
+    raw, headers = _signed(
+        {
+            "ticket_number": number,
+            "insurance_event_id": event_id,
+            "insurer_status": "approved_by_insurer",
+        }
+    )
+    resp = client.post(_INSURER_EVENTS, content=raw, headers=headers)
+
+    assert resp.status_code == 202, resp.text
+    data = _get_ticket(client, ticket_id)
+    assert str(data["insurance_event_id"]) == event_id
+
+
+def test_verdict_on_closed_claim_is_recorded_but_does_not_reopen_the_case(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Вердикт по закрытой заявке фиксируется, но case_state не двигает.
+
+    Автоматический сдвиг воскресил бы разбирательство, которое оператор уже закрыл, —
+    беззвучно, и заявка на выплату оказалась бы в работе без человека, знающего, почему
+    её закрывали. Факт при этом сохранён: дальше решает оператор, переоткрывая руками.
+    """
+    monkeypatch.setattr("api.webhooks.dispatcher.deliver_webhook", _noop_deliver)
+    _enable_secret(monkeypatch)
+    number = _create_insurance_claim(client)
+    ticket_id = _ticket_id_by_number(client, number)
+    _to_under_review(client, ticket_id)
+    before = _get_ticket(client, ticket_id)["case_state"]
+    _close(client, ticket_id)
+
+    _use(_SERVICE)
+    raw, headers = _signed(
+        {
+            "ticket_number": number,
+            "insurance_event_id": str(uuid.uuid4()),
+            "insurer_decision": "APPROVED",
+        }
+    )
+    resp = client.post(_INSURER_EVENTS, content=raw, headers=headers)
+
+    assert resp.status_code == 202, resp.text
+    data = _get_ticket(client, ticket_id)
+    assert data["case_state"] == before, "закрытую заявку вердикт не переоткрывает"
+    assert data["insurance_event_id"] is not None, "но сам факт события сохранён"
+
+
+def test_unknown_number_still_returns_404(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Расширение резолва не должно превращать 404 в утечку: чужой номер — по-прежнему 404."""
+    _enable_secret(monkeypatch)
+    _use(_SERVICE)
+    raw, headers = _signed(
+        {"ticket_number": "RH-2099-99999", "insurance_event_id": str(uuid.uuid4())}
+    )
+
+    assert client.post(_INSURER_EVENTS, content=raw, headers=headers).status_code == 404

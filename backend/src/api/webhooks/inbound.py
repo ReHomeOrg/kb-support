@@ -30,7 +30,13 @@ from api.observability.logging import get_logger
 from api.tickets.actions import resolve_on_terminal_case
 from api.tickets.case_repository import TicketCaseDetailsRepository
 from api.tickets.case_state_machine import is_allowed_case_transition
-from api.tickets.enums import CaseType, InsurerDecision, TicketCaseState, TicketType
+from api.tickets.enums import (
+    CaseType,
+    InsurerDecision,
+    TicketCaseState,
+    TicketStatus,
+    TicketType,
+)
 from api.tickets.history import TicketHistoryAction, TicketHistoryRepository
 from api.tickets.models import Ticket
 from api.tickets.repository import TicketRepository
@@ -144,7 +150,9 @@ async def receive_insurer_event(
     ):
         raise ProblemException.forbidden(detail="Invalid or missing webhook signature")
 
-    ticket = await TicketRepository(session).find_active_by_number(payload.ticket_number)
+    # Резолв, принимающий и закрытые заявки: событие страховщика — факт, а не новая
+    # переписка (#222). Ответ по существу остаётся тем же — см. гейт ниже.
+    ticket = await TicketRepository(session).find_insurance_claim_by_number(payload.ticket_number)
     # 404 anti-enum: не наша заявка / не претензионная INSURANCE.
     if ticket is None or ticket.case_state is None or ticket.type != TicketType.INSURANCE.value:
         raise ProblemException.not_found(detail="Insurance claim ticket not found")
@@ -161,11 +169,22 @@ async def receive_insurer_event(
     # транзакции с записью insurance_event_id (единый commit ниже).
     if payload.insurer_status is not None:
         await _store_insurer_status(session, ticket, payload.insurer_status)
+    # На ЗАКРЫТОЙ заявке вердикт только фиксируется, но case_state не двигается.
+    # Автоматический сдвиг воскресил бы разбирательство, которое оператор уже закрыл,
+    # причём беззвучно — и заявка на выплату оказалась бы в работе без человека,
+    # который знает, почему её закрывали. Факт при этом не теряется: событие, статус
+    # и вердикт записаны, дальше решает оператор, переоткрывая заявку руками.
+    is_closed = ticket.status == TicketStatus.CLOSED.value
     case_change = (
         _apply_insurer_verdict(ticket, payload.insurer_decision)
-        if payload.insurer_decision is not None
+        if payload.insurer_decision is not None and not is_closed
         else None
     )
+    if is_closed and payload.insurer_decision is not None:
+        _logger.warning(
+            "insurer verdict on closed ticket recorded without case shift ticket=%s",
+            ticket.id,
+        )
 
     history = TicketHistoryRepository(session)
     to_value: dict[str, object] = {"insurance_event_id": str(payload.insurance_event_id)}

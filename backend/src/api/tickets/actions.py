@@ -278,6 +278,12 @@ class TicketActionService:
         if target is TicketCaseState.PAYOUT_PENDING:
             # Дедлайн выплаты 10 раб.дн от входа в фазу выплаты (Договор 5.8.8, Q2).
             ticket.payout_due_at = compute_payout_due_at(current_now)
+        if current is TicketCaseState.PAYOUT_PENDING:
+            # Уходим из фазы выплаты — маркер первого аппрувера «4 глаз» больше не
+            # относится ни к чему. Успешный PAID чистит его сам (`_approve_payout`,
+            # возврат выше), поэтому сюда попадает только PAYOUT_PENDING→REJECTED:
+            # раньше actor первого аппрува навсегда оставался висеть в JSONB.
+            _clear_payout_first_approver(ticket)
         ticket.case_state = target.value
         await self._session.flush()
         to_value: dict[str, object] = {"case_state": target.value}

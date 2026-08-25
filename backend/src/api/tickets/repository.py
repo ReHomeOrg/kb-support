@@ -125,6 +125,23 @@ class TicketRepository:
 
         await run_rules(self._session, ticket, trigger)
 
+    async def _ensure_claim_intake(self, ticket: Ticket) -> None:
+        """Инициализировать разбирательство, если заявка стала claims-типом и его ещё нет.
+
+        Инвариант: claims-тип ⇒ инициализированное разбирательство (case_state,
+        TicketCaseDetails, срок рассмотрения). Раньше он держался только на generic
+        `create`, а claims-тип умеют выставлять ещё два пути: эскалация из чата
+        (`TicketFromChat.type` принимает все четыре claims-типа) и PATCH оператора.
+        Заявка оказывалась claims-типом с `case_state=None`: решение и переходы
+        отвечали 422, то есть претензию нельзя было вести вообще.
+
+        Повторно НЕ инициализируем: `apply_claim_intake` сбрасывает case_state в
+        CLAIM_SUBMITTED и пересчитывает срок рассмотрения, а детали 1:1 — второй
+        вызов на уже начатом разбирательстве откатил бы его к началу.
+        """
+        if ticket.type in CLAIMS_TYPES and ticket.case_state is None:
+            await apply_claim_intake(self._session, ticket)
+
     async def create(self, payload: TicketCreate, principal: Principal) -> Ticket:
         """Создать заявку.
 
@@ -159,8 +176,7 @@ class TicketRepository:
         # claims-типов. ПОСЛЕ flush и ДО _run_automation — чтобы on_create-правила (D8)
         # видели уже инициализированное разбирательство. Только generic create несёт
         # claims-каналы (from_chat/from_email форсят AI_CHAT/EMAIL — claims недостижимы).
-        if ticket.type in CLAIMS_TYPES:
-            await apply_claim_intake(self._session, ticket)
+        await self._ensure_claim_intake(ticket)
         # ФЗ-152 / §3.7: первая запись журнала — создание. actor = принципал
         # (для оператора-от-имени-заявителя actor — оператор, requester_id — заявитель).
         await self._history.record(
@@ -202,6 +218,21 @@ class TicketRepository:
             Ticket.number == number,
             Ticket.status != TicketStatus.CLOSED.value,
         )
+        return (await self._session.execute(stmt)).scalars().first()
+
+    async def find_insurance_claim_by_number(self, number: str) -> Ticket | None:
+        """INSURANCE-заявка по номеру, ВКЛЮЧАЯ закрытые (E10-8, issue #222).
+
+        Отдельный резолв от `find_active_by_number` намеренно. Тот исключает CLOSED,
+        потому что писался под приём почты: ответ на закрытую заявку — новая переписка,
+        и заводить его в закрытую нельзя (ADR-0010 Реш.3). Событие от страховщика —
+        не переписка, а факт: страховщик присылает вердикт тогда, когда присылает, и
+        оператор мог закрыть заявку раньше. С прежним резолвом такое событие получало
+        404, `insurance_event_id` не проставлялся, и связь с выплатой терялась молча.
+
+        Тип и claims-контекст проверяет вызывающий (404 anti-enum).
+        """
+        stmt = select(Ticket).where(Ticket.number == number)
         return (await self._session.execute(stmt)).scalars().first()
 
     async def find_guarantee_by_reference(self, reference: str) -> Ticket | None:
@@ -270,6 +301,9 @@ class TicketRepository:
         # выше, дедлайны не пересчитываются). После flush — created_at доступен.
         await apply_sla(self._session, ticket)
         record_ticket_created(ticket)  # rate входящих (FR-7.3, #168) — только new-ветка
+        # Эскалация из чата умеет нести claims-тип (COMPENSATION/GUARANTEE/INSURANCE/
+        # ACCEPTANCE_ACT) — разбирательство инициализируем здесь же, до on_create-правил.
+        await self._ensure_claim_intake(ticket)
         await self._history.record(
             ticket.id,
             principal.user_id,
@@ -446,6 +480,10 @@ class TicketRepository:
 
         apply_status_side_effects(ticket, old_status)
         await self._session.flush()
+        # Оператор мог переклассифицировать заявку в claims-тип: без инициализации
+        # разбирательства она осталась бы с case_state=None, и вести претензию было
+        # бы нечем. Уже начатое разбирательство не трогаем (см. _ensure_claim_intake).
+        await self._ensure_claim_intake(ticket)
 
         after: dict[str, Any] = {field: getattr(ticket, field) for field in _AUDITED_FIELDS}
         await record_changes(self._history, ticket.id, principal.user_id, before, after)
